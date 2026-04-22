@@ -80,7 +80,10 @@ export default definePluginEntry({
         resolveThreadToken(event.threadId) ||
         resolveThreadToken(event.metadata?.threadId) ||
         resolveThreadToken(event.metadata?.threadTs);
-      const channelId = (event.metadata?.channelId as string) ?? ctx.conversationId ?? "";
+      const channelId =
+        normalizeOptionalString(ctx.conversationId) ||
+        normalizeOptionalString(event.metadata?.channelId) ||
+        "";
       if (!threadTs || !channelId) {
         return;
       }
@@ -109,7 +112,7 @@ export default definePluginEntry({
         normalizeOptionalString(event.metadata?.channelId) ||
         normalizeOptionalString(event.to) ||
         "";
-      if (!threadTs) {
+      if (!threadTs || !channelId) {
         return undefined;
       }
       if (abTestChannels.size > 0 && !abTestChannels.has(channelId)) {

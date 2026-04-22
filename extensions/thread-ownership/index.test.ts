@@ -71,6 +71,16 @@ describe("thread-ownership plugin", () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
+    it("fails open when Slack thread routing has no canonical conversation id", async () => {
+      const result = await hooks.message_sending(
+        { content: "hello", replyToId: "1234.5678", metadata: {}, to: "" },
+        { channelId: "slack", conversationId: "" },
+      );
+
+      expect(result).toBeUndefined();
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it("claims ownership successfully", async () => {
       vi.mocked(globalThis.fetch).mockResolvedValue(
         new Response(JSON.stringify({ owner: "test-agent" }), { status: 200 }),
@@ -154,6 +164,29 @@ describe("thread-ownership plugin", () => {
       // Now send in the same thread -- should skip the ownership HTTP call.
       const result = await hooks.message_sending(
         { content: "Sure!", replyToId: "9999.0001", metadata: { channelId: "C456" }, to: "C456" },
+        { channelId: "slack", conversationId: "C456" },
+      );
+
+      expect(result).toBeUndefined();
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it("tracks mentions under the shared conversationId when inbound metadata is non-canonical", async () => {
+      await hooks.message_received(
+        {
+          content: "Hey @TestBot help me",
+          threadId: "9999.0002",
+          metadata: { channelId: "channel:C456" },
+        },
+        { channelId: "slack", conversationId: "C456" },
+      );
+
+      const result = await hooks.message_sending(
+        {
+          content: "Sure!",
+          replyToId: "9999.0002",
+          to: "channel:C456",
+        },
         { channelId: "slack", conversationId: "C456" },
       );
 
