@@ -1,12 +1,18 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import {
   abortAgentHarnessRun,
   queueAgentHarnessMessage,
   type EmbeddedRunAttemptParams,
 } from "openclaw/plugin-sdk/agent-harness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  initializeGlobalHookRunner,
+  resetGlobalHookRunner,
+} from "../../../../src/plugins/hook-runner-global.js";
+import { createMockPluginRegistry } from "../../../../src/plugins/hooks.test-helpers.js";
 import { CODEX_GPT5_BEHAVIOR_CONTRACT } from "../../prompt-overlay.js";
 import type { CodexServerNotification } from "./protocol.js";
 import { runCodexAppServerAttempt, __testing } from "./run-attempt.js";
@@ -88,6 +94,9 @@ function createAppServerHarness(
         },
       });
     },
+    async notify(notification: CodexServerNotification) {
+      await notify(notification);
+    },
   };
 }
 
@@ -157,8 +166,143 @@ describe("runCodexAppServerAttempt", () => {
 
   afterEach(async () => {
     __testing.resetCodexAppServerClientFactoryForTests();
+    resetGlobalHookRunner();
     vi.restoreAllMocks();
     await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("fires llm_input, llm_output, and agent_end hooks for codex turns", async () => {
+    const llmInput = vi.fn();
+    const llmOutput = vi.fn();
+    const agentEnd = vi.fn();
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        { hookName: "llm_input", handler: llmInput },
+        { hookName: "llm_output", handler: llmOutput },
+        { hookName: "agent_end", handler: agentEnd },
+      ]),
+    );
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const sessionManager = SessionManager.open(sessionFile);
+    sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "existing context" }],
+      timestamp: Date.now(),
+    });
+    const harness = createStartedThreadHarness();
+
+    const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir));
+    await harness.waitForMethod("turn/start");
+    await vi.waitFor(() => expect(llmInput).toHaveBeenCalledTimes(1), { interval: 1 });
+
+    expect(llmInput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+        provider: "codex",
+        model: "gpt-5.4-codex",
+        prompt: "hello",
+        imagesCount: 0,
+        historyMessages: [
+          expect.objectContaining({
+            role: "assistant",
+          }),
+        ],
+        systemPrompt: expect.stringContaining(CODEX_GPT5_BEHAVIOR_CONTRACT),
+      }),
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+      }),
+    );
+
+    await harness.notify({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "msg-1",
+        delta: "hello back",
+      },
+    });
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    const result = await run;
+
+    expect(result.assistantTexts).toEqual(["hello back"]);
+    await vi.waitFor(() => expect(llmOutput).toHaveBeenCalledTimes(1), { interval: 1 });
+    await vi.waitFor(() => expect(agentEnd).toHaveBeenCalledTimes(1), { interval: 1 });
+
+    expect(llmOutput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+        provider: "codex",
+        model: "gpt-5.4-codex",
+        assistantTexts: ["hello back"],
+        lastAssistant: expect.objectContaining({
+          role: "assistant",
+        }),
+      }),
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+      }),
+    );
+    expect(agentEnd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        messages: expect.arrayContaining([
+          expect.objectContaining({ role: "user" }),
+          expect.objectContaining({ role: "assistant" }),
+        ]),
+      }),
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+      }),
+    );
+  });
+
+  it("fires agent_end with failure metadata when the codex turn fails", async () => {
+    const agentEnd = vi.fn();
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([{ hookName: "agent_end", handler: agentEnd }]),
+    );
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const harness = createStartedThreadHarness();
+
+    const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir));
+    await harness.waitForMethod("turn/start");
+    await harness.notify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        turn: {
+          id: "turn-1",
+          status: "failed",
+          error: { message: "codex exploded" },
+        },
+      },
+    });
+
+    const result = await run;
+
+    expect(result.promptError).toBe("codex exploded");
+    await vi.waitFor(() => expect(agentEnd).toHaveBeenCalledTimes(1), { interval: 1 });
+    expect(agentEnd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        error: "codex exploded",
+      }),
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+      }),
+    );
   });
 
   it("forwards queued user input and aborts the active app-server turn", async () => {

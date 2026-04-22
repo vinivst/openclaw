@@ -17,6 +17,10 @@ discovery, native thread resume, native compaction, and app-server execution.
 OpenClaw still owns chat channels, session files, model selection, tools,
 approvals, media delivery, and the visible transcript mirror.
 
+Native Codex turns also emit the shared `llm_input`, `llm_output`, and
+`agent_end` plugin hooks, so lifecycle automation can observe Codex app-server
+runs without falling back to the PI harness.
+
 The harness is off by default. It is selected only when the `codex` plugin is
 enabled and the resolved model is a `codex/*` model, or when you explicitly
 force `embeddedHarness.runtime: "codex"` or `OPENCLAW_AGENT_RUNTIME=codex`.

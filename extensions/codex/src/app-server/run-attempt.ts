@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import {
   buildEmbeddedAttemptToolRunContext,
   clearActiveEmbeddedRun,
   createOpenClawCodingTools,
   embeddedAgentLog,
+  formatErrorMessage,
   isSubagentSessionKey,
   normalizeProviderToolSchemas,
   resolveAttemptSpawnWorkspaceDir,
@@ -12,6 +14,9 @@ import {
   resolveSandboxContext,
   resolveSessionAgentIds,
   resolveUserPath,
+  runAgentHarnessAgentEndHook,
+  runAgentHarnessLlmInputHook,
+  runAgentHarnessLlmOutputHook,
   setActiveEmbeddedRun,
   supportsModelTools,
   type EmbeddedRunAttemptParams,
@@ -36,7 +41,11 @@ import {
 } from "./protocol.js";
 import { readCodexAppServerBinding, type CodexAppServerThreadBinding } from "./session-binding.js";
 import { clearSharedCodexAppServerClient } from "./shared-client.js";
-import { buildTurnStartParams, startOrResumeThread } from "./thread-lifecycle.js";
+import {
+  buildDeveloperInstructions,
+  buildTurnStartParams,
+  startOrResumeThread,
+} from "./thread-lifecycle.js";
 import { mirrorCodexAppServerTranscript } from "./transcript-mirror.js";
 
 let clientFactory = defaultCodexAppServerClientFactory;
@@ -45,6 +54,7 @@ export async function runCodexAppServerAttempt(
   params: EmbeddedRunAttemptParams,
   options: { pluginConfig?: unknown; startupTimeoutFloorMs?: number } = {},
 ): Promise<EmbeddedRunAttemptResult> {
+  const attemptStartedAt = Date.now();
   const appServer = resolveCodexAppServerRuntimeOptions({ pluginConfig: options.pluginConfig });
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
   await fs.mkdir(resolvedWorkspace, { recursive: true });
@@ -190,6 +200,28 @@ export async function runCodexAppServerAttempt(
 
   let turn: CodexTurnStartResponse;
   try {
+    runAgentHarnessLlmInputHook({
+      event: {
+        runId: params.runId,
+        sessionId: params.sessionId,
+        provider: params.provider,
+        model: params.modelId,
+        systemPrompt: buildDeveloperInstructions(params),
+        prompt: params.prompt,
+        historyMessages: readMirroredSessionHistoryMessages(params.sessionFile),
+        imagesCount: params.images?.length ?? 0,
+      },
+      ctx: {
+        runId: params.runId,
+        agentId: sessionAgentId,
+        sessionKey: params.sessionKey,
+        sessionId: params.sessionId,
+        workspaceDir: params.workspaceDir,
+        messageProvider: params.messageProvider ?? undefined,
+        trigger: params.trigger,
+        channelId: params.messageChannel ?? params.messageProvider ?? undefined,
+      },
+    });
     turn = await client.request<CodexTurnStartResponse>(
       "turn/start",
       buildTurnStartParams(params, {
@@ -258,6 +290,45 @@ export async function runCodexAppServerAttempt(
       result,
       threadId: thread.threadId,
       turnId: activeTurnId,
+    });
+    runAgentHarnessLlmOutputHook({
+      event: {
+        runId: params.runId,
+        sessionId: params.sessionId,
+        provider: params.provider,
+        model: params.modelId,
+        assistantTexts: result.assistantTexts,
+        ...(result.lastAssistant ? { lastAssistant: result.lastAssistant } : {}),
+        ...(result.attemptUsage ? { usage: result.attemptUsage } : {}),
+      },
+      ctx: {
+        runId: params.runId,
+        agentId: sessionAgentId,
+        sessionKey: params.sessionKey,
+        sessionId: params.sessionId,
+        workspaceDir: params.workspaceDir,
+        messageProvider: params.messageProvider ?? undefined,
+        trigger: params.trigger,
+        channelId: params.messageChannel ?? params.messageProvider ?? undefined,
+      },
+    });
+    runAgentHarnessAgentEndHook({
+      event: {
+        messages: result.messagesSnapshot,
+        success: !result.aborted && !result.promptError,
+        ...(result.promptError ? { error: formatErrorMessage(result.promptError) } : {}),
+        durationMs: Date.now() - attemptStartedAt,
+      },
+      ctx: {
+        runId: params.runId,
+        agentId: sessionAgentId,
+        sessionKey: params.sessionKey,
+        sessionId: params.sessionId,
+        workspaceDir: params.workspaceDir,
+        messageProvider: params.messageProvider ?? undefined,
+        trigger: params.trigger,
+        channelId: params.messageChannel ?? params.messageProvider ?? undefined,
+      },
     });
     return {
       ...result,
@@ -474,6 +545,18 @@ function isTurnNotification(value: JsonValue | undefined, turnId: string): boole
 function readString(record: JsonObject, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function readMirroredSessionHistoryMessages(sessionFile: string): unknown[] {
+  try {
+    return SessionManager.open(sessionFile).buildSessionContext().messages;
+  } catch (error) {
+    embeddedAgentLog.warn("failed to read mirrored session history for codex llm_input hook", {
+      error,
+      sessionFile,
+    });
+    return [];
+  }
 }
 
 async function mirrorTranscriptBestEffort(params: {
