@@ -4,11 +4,16 @@ import { loadConfig, type OpenClawConfig } from "../config/config.js";
 import { setVerbose } from "../globals.js";
 import { resolveMessageChannelSelection } from "../infra/outbound/channel-selection.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
+import { ensurePluginRegistryLoaded } from "./plugin-registry.js";
 
 type ChannelAuthOptions = {
   channel?: string;
   account?: string;
   verbose?: boolean;
+  /** Use pairing code instead of QR (WhatsApp only). */
+  useCode?: boolean;
+  /** Phone number for pairing code (E.164 format). */
+  phoneNumber?: string;
 };
 
 type ChannelPlugin = NonNullable<ReturnType<typeof getChannelPlugin>>;
@@ -49,6 +54,9 @@ export async function runChannelLogin(
   opts: ChannelAuthOptions,
   runtime: RuntimeEnv = defaultRuntime,
 ) {
+  // Ensure channel plugins are loaded before resolving the channel.
+  ensurePluginRegistryLoaded();
+
   const cfg = loadConfig();
   const { channelInput, plugin } = await resolveChannelPluginForMode(opts, "login", cfg);
   const login = plugin.auth?.login;
@@ -64,6 +72,8 @@ export async function runChannelLogin(
     runtime,
     verbose: Boolean(opts.verbose),
     channelInput,
+    useCode: opts.useCode,
+    phoneNumber: opts.phoneNumber,
   });
 }
 
@@ -71,6 +81,9 @@ export async function runChannelLogout(
   opts: ChannelAuthOptions,
   runtime: RuntimeEnv = defaultRuntime,
 ) {
+  // Ensure channel plugins are loaded before resolving the channel.
+  ensurePluginRegistryLoaded();
+
   const cfg = loadConfig();
   const { channelInput, plugin } = await resolveChannelPluginForMode(opts, "logout", cfg);
   const logoutAccount = plugin.gateway?.logoutAccount;
